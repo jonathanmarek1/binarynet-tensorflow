@@ -1,0 +1,31 @@
+set -e
+
+TOOLS="/usr/lib/android-sdk/build-tools/debian/"
+PLATFORM_JAR="/usr/lib/android-sdk/platforms/android-23/android.jar"
+NDK="$NDK/platforms/android-23/arch-arm/usr"
+
+rm -r build || true
+mkdir build build/test build/lib build/lib/$ARCH
+
+clang-5.0 -Wall -nostdlib -shared -Ofast -flto -fuse-ld=lld-5.0 -I$NDK/include -L$NDK/lib $CFLAGS -DNUM_THREAD=1 \
+    -lc -llog -lGLESv2 -landroid -lmediandk \
+     *.c ../xnornet_bwn_bnn.c -I../ \
+    -o build/lib/$ARCH/libhello-jni.so
+
+
+$TOOLS/aapt package -M AndroidManifest.xml -I $PLATFORM_JAR -S res -F build/app.res.apk -J build/test -f
+
+javac -d build -source 7 -target 7 -classpath $PLATFORM_JAR build/test/R.java *.java
+
+$TOOLS/dx --dex --output=build/classes.dex build
+
+java -classpath /usr/share/java/com.android.tools.sdklib.jar \
+    com.android.sdklib.build.ApkBuilderMain \
+    build/app.tmp.apk -u -z build/app.res.apk -f build/classes.dex -nf build/lib
+
+keytool -genkeypair -v -dname "cn=none, ou=none, o=none, c=CA" -keystore build/keystore \
+    -keyalg RSA -keysize 2048 -validity 36500 -alias "alias" -keypass pass12 -storepass pass12
+
+jarsigner -sigalg SHA1withRSA -digestalg SHA1 -keystore build/keystore build/app.tmp.apk \
+    -keypass pass12 -storepass pass12 alias
+zipalign -f 4 build/app.tmp.apk build/app.apk
