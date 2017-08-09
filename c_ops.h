@@ -6,6 +6,7 @@
 implementation of the layers in C
 definitely needs some cleaning up
 */
+
 typedef unsigned uint;
 #define sizearray(x) (sizeof(x)/sizeof(*x))
 
@@ -67,35 +68,8 @@ enum {
 #include "c_ops_neon.h"
 //#include "cortexa53.h"
 
-#define for_each_v() f(0) f(1) f(2) f(3) f(4) f(5) f(6) f(7) f(8) f(9) f(10) f(11) f(12) f(13) f(14) f(15) f(16) f(17) f(18) f(19) f(20) f(21) f(22) f(23)
-#define for_each_c() f(0),f(1),f(2),f(3),f(4),f(5),f(6),f(7),f(8),f(9),f(10),f(11), \
-    f(12),f(13),f(14),f(15),f(16),f(17),f(18),f(19),f(20),f(21),f(22),f(23)
-
 __attribute__ ((always_inline))
-static uint region_id(uint i, uint j, uint out_w, uint out_h, uint sx, uint sy, uint px, uint py)
-{
-    int xr, yr, xh, yh, x, y;
-
-    xr = (px - 1) / sx + 1;
-    yr = (py - 1) / sy + 1;
-    xh = xr * 2 + 1;
-    yh = yr * 2 + 1;
-    x = xr;
-    if (i < xr)
-        x = i;
-    else if (i >= out_w - xr)
-        x = xh + i - out_w;
-    y = yr;
-    if (j < yr)
-        y = j;
-    else if (j >= out_h - yr)
-        y = yh + j - out_h;
-
-    return x*yh+y;
-}
-
-__attribute__ ((always_inline))
-static void binarize_float(uint32_t *output, float32x4_t *buf, float32x4_t *beta, float32x4_t *min, float sum, uint size)
+static void binarize_float(uint32_t *output, float32x4_t *buf, uint size)
 {
     uint32x4_t *buf_u32 = (void*) buf;
     uint8x16_t *buf_u8 = (void*) buf;
@@ -109,34 +83,8 @@ static void binarize_float(uint32_t *output, float32x4_t *buf, float32x4_t *beta
     //printf("%f\n", buf[0][0] + min[0][0] * sum);
 
     for (k = 0; k < size; k++)
-        buf_u32[k] = vcltq_f32(buf[k] + min[k] * vdupq_n_f32(sum), beta[k]);
-
-    for (k = 0; k < size / 4; k++) {
-        buf_u8[k] = vcombine_u8(
-        vmovn_u16(vcombine_u16(vmovn_u32(buf_u32[k*4+0]), vmovn_u32(buf_u32[k*4+1]))),
-        vmovn_u16(vcombine_u16(vmovn_u32(buf_u32[k*4+2]), vmovn_u32(buf_u32[k*4+3]))));
-    }
-
-    binarize(output, buf_u8, size / 4);
-}
-
-__attribute__ ((always_inline))
-static void binarize_i32(uint32_t *output, int32x4_t *buf, int32x4_t *beta, int32x4_t *min, int32_t sum, uint size)
-{
-    uint32x4_t *buf_u32 = (void*) buf;
-    uint8x16_t *buf_u8 = (void*) buf;
-
-    uint k;
-
-    _assert(size % 8 == 0);
-
-    //note: for some reason clang stores min as a list of 24 pointers on the stack instead of a single pointer
-
-    //printf("%f %f %f %f\n", buf[0][0], min[0][0], beta[0][0], sum);
-    //printf("%f\n", buf[0][0] + min[0][0] * sum);
-
-    for (k = 0; k < size; k++)
-        buf_u32[k] = vcltq_s32(buf[k] + min[k] * vdupq_n_s32(sum), beta[k]);
+        buf_u32[k] = vcltq_f32(buf[k], vdupq_n_f32(0.0f));
+        //buf_u32[k] = vcltq_f32(buf[k] + min[k] * vdupq_n_f32(sum), beta[k]);
 
     for (k = 0; k < size / 4; k++) {
         buf_u8[k] = vcombine_u8(
@@ -164,9 +112,8 @@ static void binarize_u16(uint8x16_t *output, uint16x8_t *buf, uint16x8_t *beta, 
     binarize((void*) output, buf_u8, size / 2);
 }
 
-
-#include <android/log.h>
-#define printf(args...) __android_log_print(ANDROID_LOG_ERROR, "test_app", args)
+//#include <android/log.h>
+//#define printf(args...) __android_log_print(ANDROID_LOG_ERROR, "test_app", args)
 
 __attribute__ ((always_inline))
 static tensor conv2d(tensor input, tensor filter, tensor out_b, uint sx, uint sy, uint px, uint py, uint activation, float *qp, int *sync)
@@ -174,25 +121,22 @@ static tensor conv2d(tensor input, tensor filter, tensor out_b, uint sx, uint sy
     _assert(input.dim == 3 && filter.dim == 4);
 
     bool accum16 = (input.type == BINARY && filter.type == BINARY);
-#if 0
-//#ifdef __aarch64__
-#define f(x) register uint8x16_t v##x asm ("v"#x"");
-    for_each_v()
+#define f(x) register uint8x16_t v##x;
+    for_each_reg(f)
 #undef f
+#if 0 //def __aarch64__
+#define v_ptr (uint8x16_t[]) {v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23}
     int split_size = accum16 ? 128 : 96;
     int split_num = (filter.shape[3] - 1) / split_size + 1;
     int num_reg_base = accum16 ? 16 : 24;
 #else
-#define f(x) uint8x16_t v##x;
-    for_each_v()
-#undef f
     int split_size = accum16 ? 64 : 32;
     int split_num = (filter.shape[3] - 1) / split_size + 1;
     int num_reg_base = accum16 ? 8 : 8;
+#define v_ptr (uint8x16_t[]) {v0, v1, v2, v3, v4, v5, v6, v7}
 #endif
     int num_reg;
     int num_reg_last = (filter.shape[3] / (accum16 ? 8 : 4) - 1) % num_reg_base + 1;
-#define v_ptr (uint8x16_t[]) {v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23}
 
     _assert(filter.shape[3] % (accum16 ? 8 : 4) == 0);
 
@@ -222,7 +166,7 @@ static tensor conv2d(tensor input, tensor filter, tensor out_b, uint sx, uint sy
         num_reg = (k + 1 == split_num) ? num_reg_last : num_reg_base;
 
 #define f(x) if (x < num_reg) v##x = (uint8x16_t) {};
-        for_each_v()
+        for_each_reg(f)
 #undef f
 
         sum = 0;
@@ -234,7 +178,7 @@ static tensor conv2d(tensor input, tensor filter, tensor out_b, uint sx, uint sy
                if (input.type == BINARY && filter.type == BINARY) {
 #define f(x) if (x < num_reg) v##x = \
     vreinterpretq_u8_u16(vreinterpretq_u16_u8(v##x) + vdupq_n_u16(filter.shape[2] / 2));
-                for_each_v()
+                for_each_reg(f)
 #undef f
                 }
                 continue;
@@ -250,13 +194,15 @@ static tensor conv2d(tensor input, tensor filter, tensor out_b, uint sx, uint sy
                 ptr(filter, bool, u, v, 0, 0) + k * split_size * filter.shape[2] / 8,
                              filter.shape[2]);
             } else if (input.type == INT8 && filter.type == BINARY) {
+                _assert(num_reg % 2 == 0);
+
                 for (z = 0; z < filter.shape[2]; z++)
                     sum += *ptr(input, uint8_t, x, y, z);
                 int8_bin_kernel(ptr(input, uint8_t, x, y, 0),
                 ptr(filter, bool, u, v, 0, 0) + k * split_size * filter.shape[2] / 8,
                              filter.shape[2]);
             } else if (input.type == INT8 && filter.type == INT8) {
-                sum += 128 * filter.shape[2];
+                //sum += 128 * filter.shape[2];
                 for (z = 0; z < filter.shape[2]; z++)
                     sum += (int8_t) *ptr(input, uint8_t, x, y, z);
 
@@ -275,30 +221,17 @@ static tensor conv2d(tensor input, tensor filter, tensor out_b, uint sx, uint sy
 
         void *out;
         void *b, *m, *c, *d;
-        uint id = region_id(i, j, out_w, out_h, sx, sy, px, py);
 
-        //_assert(input.type == FLOAT);
         if (input.type == FLOAT || input.type == INT8) { //float accum
-            if (activation == ACTIVE_BIN) {
-                out = ptr(output, bool, i, j, k * split_size);
-                b = ptr(out_b, float, id, k * split_size);
-                //m = ptr(out_b, float, 9, k * split_size);
-                //binarize_float(out, v_ptr, b, m, sum, num_reg);
-                _assert(0);
-            } else {
-                out = ptr(output, float, i, j, k * split_size);
-                m = ptr(out_b, float, 0, k * split_size);
-                b = ptr(out_b, float, 1, k * split_size);
-                c = ptr(out_b, float, 2, k * split_size);
-                d = ptr(out_b, float, 3, k * split_size);
+            out = ptr(output, float, i, j, k * split_size);
+            m = ptr(out_b, float, 0, k * split_size);
+            b = ptr(out_b, float, 1, k * split_size);
+            c = ptr(out_b, float, 2, k * split_size);
+            d = ptr(out_b, float, 3, k * split_size);
 
-                if (!i && !j && !k && activation == ACTIVE_NONE)
-                    printf("%i, %i, %f %f %f %f %f\n",
-                            vreinterpretq_s32_u8(v0)[0], sum,
-                            *(float*) m, *(float*) b, *(float*) c, *(float*) d, qp[0]);
-
-                // (x-128-m)*(w-128)
-                // x*w (-128-m)*w -x*128 - (-128-m)*128
+            float sum2;
+            if (filter.type == INT8 && input.type == INT8)
+                sum2 = (float) sum + (filter.shape[0]*filter.shape[1]*filter.shape[2]) * qp[1];
 
 #define f(x) if (x < num_reg) ({ \
     float32x4_t tmp; \
@@ -312,54 +245,60 @@ static tensor conv2d(tensor input, tensor filter, tensor out_b, uint sx, uint sy
     if (filter.type == FLOAT) \
         tmp = tmp + ((float32x4_t*)m)[x]; \
     else if (filter.type == INT8 && input.type == INT8) \
-        tmp = vmulq_n_f32(tmp + ((float32x4_t*)c)[x] * vdupq_n_f32(sum) + vdupq_n_f32(128.0f) * ((float32x4_t*)d)[x], qp[0]) * ((float32x4_t*)b)[x] + ((float32x4_t*)m)[x]; \
+        tmp = vmulq_n_f32(tmp + ((float32x4_t*)c)[x] * vdupq_n_f32(sum2) + vdupq_n_f32(qp[1]) * ((float32x4_t*)d)[x], qp[0]) * ((float32x4_t*)b)[x] + ((float32x4_t*)m)[x]; \
     else \
         tmp = tmp * vmulq_n_f32(((float32x4_t*)m)[x], qp[0]) + ((float32x4_t*)b)[x]; \
     if (activation == ACTIVE_RELU) \
         tmp = vmaxq_f32(tmp, vdupq_n_f32(0.0f)); \
-    ((float32x4_t*)out)[x] = tmp; \
+    if (activation == ACTIVE_BIN) \
+        v##x = tmp; \
+    else \
+        ((float32x4_t*)out)[x] = tmp; \
 });
-        for_each_v()
+        for_each_reg(f)
 #undef f
-            }
-        } else if (filter.type == BINARY) { //u16 accum
+            if (activation == ACTIVE_BIN)
+                binarize_float((void*) ptr(output, bool, i, j, k * split_size), (void*) v_ptr, num_reg);
+        } else if (input.type == BINARY) {
+            _assert(filter.type == BINARY);;
+
             if (activation == ACTIVE_BIN) {
                 out = ptr(output, bool, i, j, k * split_size);
                 b = ptr(out_b, uint16_t, 0, k * split_size);
                 binarize_u16(out, (void*) v_ptr, b, num_reg);
             } else {
-                _assert(num_reg % 2 == 0);
                 out = ptr(output, float, i, j, k * split_size);
                 m = ptr(out_b, float, 0, k * split_size);
                 b = ptr(out_b, float, 1, k * split_size);
+#if 1
+                int z;
+                for (z = 0; z < num_reg * 8; z++) {
+                    ((float*) out)[z] = (float) (int) (filter.shape[0]*filter.shape[1]*filter.shape[2] - 2 * vreinterpretq_u16_u8(v_ptr[z / 8])[z % 8])
+                        * ((float*) m)[z] + ((float*) b)[z];
 
-                float *mf = m, *bf = b, *outf = out;
-
-                for (int i = 0; i < num_reg * 8; i++) {
-                    int ss = filter.shape[0]*filter.shape[1]*filter.shape[2] - vreinterpretq_u16_u8(v_ptr[i / 8])[i % 8] * 2;
-                    float v = ss * mf[i] + bf[i];
                     if (activation == ACTIVE_RELU)
-                        v = __builtin_fmaxf(v, 0.0f);
-                    outf[i] = v;
+                        ((float*) out)[z] = __builtin_fmaxf(((float*) out)[z], 0.0f);
                 }
 
-/*#define f(x) if (x < num_reg) { \
-    uint32x4_t tmp = vmovl_u16((x & 1) ? vget_high_u8(v_ptr[x/2]) : vget_low_u8(v_ptr[x/2])); \
-    float32x4_t a = vcvtq_f32_u32(tmp); \
-    ((float32x4_t*)out)[x] = a * ((float32x4_t*)m)[x] + ((float32x4_t*)b)[x]; \
-}
-        for_each_v()
-#undef f */
+#else
+#define f(x) if (x < num_reg) ({ \
+    float32x4_t tmp0, tmp1, in_size; \
+    in_size = vdupq_n_f32(filter.shape[0]*filter.shape[1]*filter.shape[2]); \
+    tmp0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(v##x))); \
+    tmp1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(v##x))); \
+    tmp0 = in_size - tmp0 * vdupq_n_f32(2.0f); \
+    tmp1 = in_size - tmp1 * vdupq_n_f32(2.0f); \
+    tmp0 = tmp0 * ((float32x4_t*)m)[x*2+0] + ((float32x4_t*)b)[x*2+0]; \
+    tmp1 = tmp1 * ((float32x4_t*)m)[x*2+1] + ((float32x4_t*)b)[x*2+1]; \
+    ((float32x4_t*)out)[x*2+0] = tmp0; \
+    ((float32x4_t*)out)[x*2+1] = tmp1; \
+});
+        for_each_reg(f)
+#undef f
+#endif
             }
-        } else { //u32 accum
-            if (activation == ACTIVE_BIN) {
-                out = ptr(output, bool, i, j, k * split_size);
-                b = ptr(out_b, float, id, k * split_size);
-                m = ptr(out_b, float, 9, k * split_size);
-                binarize_i32(out, (void*) v_ptr, b, m, sum, num_reg);
-            } else {
-                _assert(0);
-            }
+        } else {
+            _assert(0);
         }
     } while (1);
 
@@ -451,7 +390,23 @@ tensor maxpool(tensor input, uint w, uint h, uint sx, uint sy, void *xor, int *s
     return output;
 }
 
-#include <math.h>
+static __attribute__ ((always_inline))
+tensor xnornet_fix(tensor input, uint8_t *xor)
+{
+    int i, j, k;
+    _assert(input.type == BINARY);
+    _assert(input.shape[2] % 8 == 0);
+
+    tensor output = output(input, input.shape[0], input.shape[1], input.shape[2]);
+
+    for (i = 0; i < input.shape[0]; i++) for (j = 0; j < input.shape[1]; j++) {
+        for (k = 0; k < input.shape[2]; k += 8)
+            *(uint8_t*)ptr(output, bool, i, j, k) =
+                *(uint8_t*)ptr(input, bool, i, j, k) ^ xor[k / 8];
+    }
+    return output;
+}
+
 static __attribute__ ((always_inline))
 tensor quantize(tensor input, float *qparam, bool uint8, bool need_min)
 {
@@ -467,17 +422,17 @@ tensor quantize(tensor input, float *qparam, bool uint8, bool need_min)
     out = output.data;
 
     for (i = 0; i < input.shape[0] * input.shape[1] * input.shape[2]; i++) {
-        max = fmaxf(max, in[i]);
+        max = __builtin_fmaxf(max, in[i]);
         if (need_min)
-            min = fminf(min, in[i]);
+            min = __builtin_fminf(min, in[i]);
     }
 
-    qparam[0] = max / 256.0f;
-    m = 256.0f / max;
-    qparam[1] = min * m;
+    qparam[0] = (max - min) / 256.0f;
+    m = 256.0f / (max - min);
+    qparam[1] = min * m + (uint8 ? 0.0f : 128.0f);
 
     for (i = 0; i < input.shape[0] * input.shape[1] * input.shape[2]; i++) {
-        tmp = fminf(fmaxf((in[i] - (need_min ? min : 0.0f)) * m, 0.0f), 255.0f);
+        tmp = __builtin_fminf(__builtin_fmaxf((in[i] - (need_min ? min : 0.0f)) * m, 0.0f), 255.0f);
         out[i] = tmp - (uint8 ? 0 : 128);
     }
 
@@ -589,21 +544,6 @@ static uint64_t get_time(void)
 #define w_bin_float(x, y) struct { uint8_t w[(x)*(y)/8]; float b[y*2]; }
 #define w_int8(x, y) struct { int8_t w[(x)*(y)]; float b[y*4]; }
 
-static __attribute__ ((always_inline))
-tensor xor(tensor input, uint8_t *x)
-{
-    int i, j, k;
-    uint8_t *p;
-
-    for (i = 0; i < input.shape[0]; i++) for(j = 0; j < input.shape[1]; j++) {
-        p = (void*) ptr(input, bool, i, j, 0);
-        for (k = 0; k < input.shape[2] / 8; k++)
-            p[k] ^= x[k];
-    }
-
-    return input;
-}
-
 #include <pthread.h>
 #ifndef NUM_THREAD
 #define NUM_THREAD 1
@@ -648,7 +588,7 @@ void* FUNCTION_NAME(void *in, void *weights, void *tmp) {
 
     struct thread_arg arg[NUM_THREAD];
     for (i = 0; i < NUM_THREAD; i++) {
-        arg[i] = (struct thread_arg) {in, weights, tmp, &sync, i, &wait_cnt, &mutex, &cond, 1.0f};
+        arg[i] = (struct thread_arg) {in, weights, tmp, &sync, i, &wait_cnt, &mutex, &cond};
         pthread_create(&thread[i], 0, worker, &arg[i]);
     }
 

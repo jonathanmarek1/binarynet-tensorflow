@@ -25,6 +25,7 @@ class Layer(object):
         self.act = 'none'
         self.pool = None
         self.binary = False
+        self.relu_fix = None
 
     def mul(self, m):
         self.m = self.m * m
@@ -34,15 +35,17 @@ class Layer(object):
 
     def activate(self, act):
         if act == 'relu' and self.act == 'bin': # xnornet workaround
-            assert(False)
-
-        assert(np.array_equal(self.m, np.ones(1)) and np.array_equal(self.b, np.zeros(1)))
+            assert(self.relu_fix is None)
+            self.relu_fix = -self.b / self.m < 0.0
+            return
+        assert(np.array_equal(self.m, np.ones(1)))
+        assert(np.array_equal(self.b, np.zeros(1)))
         self.act = act;
 
     def max_pool(self, pool):
         assert(self.pool == None)
         self.pool = pool
-        self.pool_xor = self.m < 0.0
+        self.pool_xor = self.m < 0.0 # for xnornet workaround
 
     def finish(self, w, strides, padding, binary, num_output):
         print('finish')
@@ -51,8 +54,6 @@ class Layer(object):
         self.padding = padding
         self.binary = binary
         self.num_output = num_output
-
-
 #
 def clipto(x, type):
     info = np.iinfo(np.int32)
@@ -88,18 +89,8 @@ def reorder(x, group_size, pairing):
 
 """
 Notes
-- quantization is a work in progress and only works in specific cases
-- doesnt support "branching" models at the moment
-"""
-
-"""
-(x-min)*k c w*m
-
-(x c w)*k*m - (min c w)*k*m
-
-
-(min c w) = sum(w)*min
-
+- some optimizations missing
+- only supports convolutional networks
 """
 
 def export(output, input, prefix, quantize):
@@ -111,8 +102,11 @@ def export(output, input, prefix, quantize):
     layers = []
     input_scale = None
     input_offset = None
+    input_type = 'FLOAT'
 
     var = [(output, Layer())]
+
+    binary = False
 
     while var:
         _var = var
@@ -159,22 +153,17 @@ def export(output, input, prefix, quantize):
             elif op.type == 'Add' or op.type == 'Sub' or op.type == 'Mul':
                 assert(len(op.inputs) == 2 and len(op.outputs) == 1)
 
-                """
-                # detect the binary activation (the final op is an Add) TODO
+                # detect binary activation (hacky)
                 if op.type == 'Add' and op.inputs[1].op.type == 'StopGradient':
                     x = op.inputs[0].op
                     y = x.inputs[0].op
                     assert(x.type == 'Maximum')
                     assert(y.type == 'Minimum')
+                    assert(layer.m == np.ones(1) and layer.b == np.zeros(1))
 
-                    # print('BINARY ACTIVATION')
-                    assert(v.m == np.ones(1) and v.b == np.zeros(1)) # TODO
-                    var += [Var(v, y.inputs[0], activate=True)]
-
-                    continue
-                """
-
-                if op.type == 'Add':
+                    layer.activate('bin')
+                    op = y
+                elif op.type == 'Add':
                     layer.add(op.inputs[1].eval())
                 elif op.type == 'Sub':
                     layer.add(-op.inputs[1].eval())
@@ -186,6 +175,11 @@ def export(output, input, prefix, quantize):
                 print('input parameters', layer.m, layer.b)
                 input_scale = layer.m
                 input_offset = layer.b
+                if layer.act == 'bin':
+                    binary = True
+                    input_type = 'BINARY'
+                else:
+                    assert(layer.act == 'none')
                 continue
             elif op.type == 'MaxPool':
                 assert(len(op.inputs) == 1 and len(op.outputs) == 1)
@@ -213,17 +207,17 @@ def export(output, input, prefix, quantize):
                     padding[1] += W.shape[1] // 2
 
                 # detect binary weights (TODO)
-                binary = False
+                bw = False
                 if op.inputs[1].op.type == 'Add':
-                    binary = True
+                    bw = True
 
-                print(padding, binary, W.shape)
+                print(padding, bw, W.shape)
 
                 stride = op.get_attr('strides')
                 assert(stride[0] == 1 and stride[3] == 1)
                 strides = [stride[1], stride[2]]
 
-                layer.finish(W, strides, padding, binary, np.prod([x.value for x in op.outputs[0].shape[1:]]))
+                layer.finish(W, strides, padding, bw, np.prod([x.value for x in op.outputs[0].shape[1:]]))
                 layers += [layer]
                 var += [(inp, Layer())]
                 continue
@@ -240,35 +234,16 @@ def export(output, input, prefix, quantize):
     code = []
     codew = []
 
-    binary = False
-    quant = False
-
     tmp_size = 0 # TODO initialize to size of input
 
     for i, layer in enumerate(layers):
         shape = layer.w.shape
-        """
-        xor = None
-        xor_diff = np.ones(1)
-        if layer.pool_xor is not None:
-            assert(layer.activate)
-            assert(not layer.binary or np.all((layer.m < 0.0) == layer.pool_xor))
-            xor = layer.pool_xor
-            if not layer.binary:
-                xor_diff = np.where((layer.m < 0.0) != layer.pool_xor, -1.0, 1.0)
-        else:
-            if layer.binary and layer.activate:
-                _xor = layer.m < 0.0
-                if np.any(_xor):
-                    assert(layer.pool is None)
-                    xor = _xor
-        """
 
         # update required size of temp memory
         k = layer.num_output
         if layer.act == 'bin':
             k = (layer.num_output + 7) // 8
-        elif not quant:
+        else:
             k = layer.num_output * 4
         tmp_size = max(tmp_size, k)
 
@@ -277,76 +252,28 @@ def export(output, input, prefix, quantize):
 
         if layer.binary:
             layer.m = layer.m * np.mean(np.abs(layer.w), axis=(0, 1, 2))
-            #
             layer.wb = layer.w < 0.0
             layer.w = None
         else:
             layer.w *= layer.m
-            #
             layer.m = None
 
+        xnornet_fix = None
+        if layer.act == 'bin' and layer.binary:
+            # xnornet negative scaling workarounds
+            if layer.pool is not None:
+                xnornet_fix = layer.pool_xor
+                assert(np.all((layer.m < 0.0) == layer.pool_xor))
+            else:
+                xnornet_fix = layer.m < 0.0
 
-
-        """
-        pad_regions = 1
-        if i == 0:
-            xr = (layer.padding[0] - 1) // layer.strides[0] + 1
-            yr = (layer.padding[1] - 1) // layer.strides[1] + 1
-            xh = (1 + 2 * xr)
-            yh = (1 + 2 * yr)
-            pad_regions = xh * yh
-
-            layer.b = np.repeat(layer.b.reshape(1,-1), xh * yh, axis=0)
-            print(xh, yh, layer.b.shape)
-
-            if not layer.binary:
-                off = input_offset[np.newaxis, np.newaxis, :, np.newaxis]
-                scale = input_scale[np.newaxis, np.newaxis, :, np.newaxis]
-
-                assert(layer.activate)
-
-                tmp = off * layer.w
-                layer.w *= scale
-                layer.w *= xor_diff
-
-                if True:
-                    _min = layer.w.min(axis=(0,1,2))
-                    _max = layer.w.max(axis=(0,1,2))
-                    m = 255.0 / (_max - _min)
-                    layer.min = np.floor(_min * m)
-                    # fix min for the floor
-                    _min = layer.min * _max / (255.0 + layer.min)
-                    m = 255.0 / (_max - _min)
-
-                    layer.w = (layer.w - _min) * m
-                    layer.b *= m
-
-                layer.b *= xor_diff
-                layer.w = np.round(layer.w) - 128.0
-                tmp = np.sum(tmp, axis=(2)) * layer.m * m * xor_diff + np.sum(128.0 * layer.w, axis=(2)) * layer.m
-
-                for x in range(xh):
-                    x0 = 0
-                    x1 = tmp.shape[0]
-                    if x < xr:
-                        x0 = layer.padding[0] - x * layer.strides[0]
-                    elif x > xr:
-                        x1 = x1 - layer.padding[0] + (xh - x - 1) * layer.strides[0]
-                    for y in range(yh):
-                        y0 = 0
-                        y1 = tmp.shape[1]
-                        if y < yr:
-                            y0 = layer.padding[1] - y * layer.strides[1]
-                        elif y > yr:
-                            y1 = y1 - layer.padding[1] + (yh - y - 1) * layer.strides[1]
-
-                        layer.b[x*yh+y] += np.sum(tmp[x0:x1,y0:y1,:], axis=(0, 1))
-
-        elif not layer.binary:
-            layer.w *= xor_diff
-        """
-
-        quantize2 = quantize
+            if not np.any(xnornet_fix):
+                xnornet_fix = None
+        elif layer.act == 'bin' and layer.pool is not None and np.any(layer.pool_xor):
+            print('fix', layer.pool_xor[0])
+            layer.w *= np.where(layer.pool_xor, -1.0, 1.0)
+            layer.b *= np.where(layer.pool_xor, -1.0, 1.0)
+            xnornet_fix = layer.pool_xor
 
         # extra parameters
         if binary:
@@ -365,50 +292,31 @@ def export(output, input, prefix, quantize):
                 k = np.concatenate([layer.m, layer.b]).astype(np.float32)
                 name =  'bin_float'
             else:
-                if quantize2:
+                if layer.act == 'bin' and layer.relu_fix is not None:
+                    layer.b = np.where(layer.relu_fix, np.inf, layer.b)
+                    layer.relu_fix = None
+
+                if quantize:
                     _min = np.min(layer.w, axis=(0,1,2))
                     _max = np.max(layer.w, axis=(0,1,2))
                     m = 255.0 / (_max - _min)
-                    mink = _min * m
 
-                    """
-                    layer.min = np.floor(_min * m)
-                    # fix min for the floor
-                    _min = layer.min * _max / (255.0 + layer.min)
+                    # used floored min so integer arithmetic can be used
+                    layer_min = np.floor(_min * m)
+                    _min = layer_min * _max / (255.0 + layer_min)
                     m = 255.0 / (_max - _min)
-                    """
 
-                    layer.w = np.round((layer.w - _min) * m) - 128.0
+                    layer.w = np.round(layer.w * m - layer_min) - 128.0
                     layer.w = np.clip(layer.w, -128.0, 127.0) # shouldnt be necessary
 
-                    k = np.concatenate([layer.b, 1.0 / m, mink + 128.0, np.sum(layer.w, axis=(0,1,2))])
+                    k = np.concatenate([layer.b, 1.0 / m, layer_min + 128.0, np.sum(layer.w, axis=(0,1,2))])
                 else:
                     k = layer.b
 
                 k = k.astype(np.float32)
-                name = 'int8' if quantize2 else 'float'
-                """
-                if layer.activate:
-                    k = -layer.b / layer.m
-                    if layer.relu_fix is not None:
-                        k = np.where(layer.relu_fix, -np.inf, k)
-                        layer.relu_fix = None
+                name = 'int8' if quantize else 'float'
 
-                    if True:
-                        k = np.ceil(k) # or is it floor?
-                        k = np.concatenate([k, layer.min[np.newaxis,:] + 128.0])
-                        k = clipto(k, np.int32).astype(np.int32)
-                        name = 'int8'
-                    else:
-                        k = k.astype(np.float32)
-                        name = 'float'
-                        # active bin
-                else:
-                    k = layer.b.astype(np.float32)
-                    name = 'float'
-                """
-
-        #assert(layer.relu_fix is None)
+        assert(layer.relu_fix is None)
 
         # reordering
         # we can gain some performance by ordering the weights in a way
@@ -419,12 +327,12 @@ def export(output, input, prefix, quantize):
             if binary:
                 group_size = 64 # 128
                 assert(layer.wb.shape[3] % group_size == 0)
-                wd = np.packbits(reorder(laber.wb, group_size, 8))
+                wd = np.packbits(reorder(layer.wb, group_size, 8))
             else:
                 # float input with binary out
                 assert(layer.wb.shape[3] % group_size == 0)
                 assert(layer.wb.shape[2] % 2 == 0)
-                if quantize2:
+                if quantize:
                     assert(group_size % 8 == 0)
 
                     x = layer.wb
@@ -435,42 +343,36 @@ def export(output, input, prefix, quantize):
                 else:
                     wd = np.packbits(reorder(layer.wb, group_size, 2))
         else:
-            if quantize2:
+            if quantize:
                 wd = reorder(layer.w, group_size, 1).astype(np.int8)
             else:
                 wd = reorder(layer.w, group_size, 1).astype(np.float32)
 
 
         #code for this layer
-        if quantize2:
+        if quantize and not binary:
             code += ['x = quantize(x, arg->quant_param, %i, %i);' % (1 if layer.binary else 0, 1 if i == 0 else 0)]
 
-        code += ['x = conv2d(x, (tensor) {4, {%i, %i, %i, %i}, w->layer%i.w, .type=%s}, (tensor) {2, {1, %i}, w->layer%i.b}, %i, %i, %i, %i, %s, %s, arg->sync);' % (*shape, i, 'BINARY' if layer.binary else 'INT8' if quantize2 else 'FLOAT', shape[3], i, layer.strides[0], layer.strides[1], layer.padding[0], layer.padding[1], 'ACTIVE_' + layer.act.upper(), 'arg->quant_param' if quantize2 else '0')]
+        code += ['x = conv2d(x, (tensor) {4, {%i, %i, %i, %i}, w->layer%i.w, .type=%s}, (tensor) {2, {1, %i}, w->layer%i.b}, %i, %i, %i, %i, %s, %s, arg->sync);' % (*shape, i, 'BINARY' if layer.binary else 'INT8' if quantize else 'FLOAT', shape[3], i, layer.strides[0], layer.strides[1], layer.padding[0], layer.padding[1], 'ACTIVE_' + layer.act.upper(), 'arg->quant_param' if quantize and not binary else '0')]
 
         if layer.pool is not None:
-            assert(not np.any(layer.pool_xor))
-            code += ['x = maxpool(x, %i, %i, %i, %i, %s, arg->sync);' % (layer.pool[0][1], layer.pool[0][2], layer.pool[1][1], layer.pool[1][2], ('w->xor%i' % i) if False else '0')]
+            code += ['x = maxpool(x, %i, %i, %i, %i, %s, arg->sync);' % (layer.pool[0][1], layer.pool[0][2], layer.pool[1][1], layer.pool[1][2], ('w->xor%i' % i) if xnornet_fix is not None else '0')]
+        elif xnornet_fix is not None:
+            code += ['x = xnornet_fix(x, w->xor%i);' % i]
 
-        pad_regions = 1
-        codew += ['w_%s(%i, %i%s) layer%i;' % (name, np.prod(shape[:-1]), shape[-1], ', %i' % pad_regions if pad_regions > 1 else '', i)]
+        codew += ['w_%s(%i, %i) layer%i;' % (name, np.prod(shape[:-1]), shape[-1], i)]
 
 
         weight_data += wd.tobytes() + k.tobytes()
 
-        """
-        if xor is not None:
+        if xnornet_fix is not None:
             # pad to 16byte multiple
             size = ((shape[-1] - 1) // 128) + 1
-            xor = np.resize(xor, size * 128)
-
-            if layer.pool is None:
-                code += ['if (!arg->id) x = xor(x, w->xor%i);' % i]
+            xnornet_fix = np.resize(xnornet_fix, size * 128)
             codew += ['uint8_t xor%i[%i/8];' % (i, size*128)]
-            weight_data += np.packbits(xor).tobytes()
-        """
+            weight_data += np.packbits(xnornet_fix).tobytes()
 
         print('layer', i, name)
-
         binary = layer.act == 'bin'
 
     print(len(weight_data))
@@ -487,7 +389,7 @@ def export(output, input, prefix, quantize):
     c += 'struct thread_arg *arg = _arg;;\n'
     c += 'struct weights *w = arg->weights;\n'
     c += '#ifdef PRINT_TIME\nuint64_t t0 = get_time(), t1;\n#endif\n'
-    c += 'tensor x = (tensor) {3, {%s}, __builtin_assume_aligned(arg->in, 16), {__builtin_assume_aligned(arg->tmp, 16), __builtin_assume_aligned(arg->tmp, 16) + %i}, .type=FLOAT};\n' % (', '.join([str(x) for x in (227, 227, 3)]), tmp_size)
+    c += 'tensor x = (tensor) {3, {%s}, __builtin_assume_aligned(arg->in, 16), {__builtin_assume_aligned(arg->tmp, 16), __builtin_assume_aligned(arg->tmp, 16) + %i}, .type=%s};\n' % (', '.join([str(x) for x in input.shape[1:]]), tmp_size, input_type)
     c += ' TIME();\n'.join(code)
     c += ' TIME();\nreturn x.data;\n}\n'
     #output.shape[1].value
@@ -501,10 +403,10 @@ def export(output, input, prefix, quantize):
     f.write(weight_data)
     f.close()
 
-    f = open(prefix + '_bnn.c', 'w')
+    f = open(prefix + '.c', 'w')
     f.write(c)
     f.close()
 
-    f = open(prefix + '_bnn.h', 'w')
+    f = open(prefix + '.h', 'w')
     f.write(h)
     f.close()

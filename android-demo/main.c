@@ -47,6 +47,7 @@ struct gl {
 };
 
 uint64_t t0;
+int paused;
 
 #include <pthread.h>
 
@@ -54,6 +55,7 @@ uint8_t buf[227*227*4];
 char out_string[1024] = "nothing.. yet";
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_out = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 static uint64_t get_time(void)
 {
@@ -90,32 +92,6 @@ void egl_init(struct egl *egl)
     assert(context);
 
     *egl = (struct egl) {display, context, config};
-
-
-    /*eglChooseConfig(display, attribs, &config, 1, &numConfigs);
-
-    EGLint format;
-    eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &format);
-
-    ANativeWindow_setBuffersGeometry(window, 0, 0, format);
-    surface = eglCreateWindowSurface(display, config, window, 0);
-    context = eglCreateContext(display, config, 0, attrib_list);
-
-    if (!eglMakeCurrent(display, surface, surface, context)) {
-        assert(0);
-    }*/
-
-    /*int32_t w, h;
-    eglQuerySurface(display, surface, EGL_WIDTH, &w);
-    eglQuerySurface(display, surface, EGL_HEIGHT, &h);
-
-    settings.window_width  = w;
-    settings.window_height = h;
-
-    bool init = gl_init();
-    if (init ==  false) {
-        LOG_ERR("AndroidGL", "gl_init failed :<");
-    } */
 }
 
 void gl_init(struct egl *egl, struct gl *gl, EGLSurface surface)
@@ -151,8 +127,27 @@ void gl_init(struct egl *egl, struct gl *gl, EGLSurface surface)
     assert(glGetError() == 0);
 }
 
-void draw(struct egl *egl, struct gl *gl, EGLSurface surface, EGLSurface enc_surface)
+static void matmul(float *r, float *a, float *b)
 {
+    int i, j, m;
+    float sum;
+
+    for (i = 0; i < 4; i++) for (j = 0; j < 4; j++) {
+        sum = 0.0f;
+        for (m = 0; m < 4; m++) {
+            sum += b[i * 4 + m] * a[m * 4 + j];
+        }
+        r[i * 4 + j] = sum;
+    }
+}
+
+void draw(struct egl *egl, struct gl *gl, float *mtx,
+    EGLSurface surface, EGLSurface enc_surface)
+{
+    float matrix[16];
+
+    memcpy(matrix, mtx, sizeof(matrix));
+
     int width, height;
     float vert[] = {-1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f};
 
@@ -175,10 +170,9 @@ void draw(struct egl *egl, struct gl *gl, EGLSurface surface, EGLSurface enc_sur
         glVertexAttribPointer(gl->pos_oes, 2, GL_FLOAT, GL_FALSE, 0, vert);
         glEnableVertexAttribArray(gl->pos_oes);
 
-        glUniform4f(gl->texture_matrix_oes, 0.5f, -0.5f, 0.5f, 0.5f);
+        glUniformMatrix4fv(gl->texture_matrix_oes, 1, 1, matrix);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-        //eglPresentationTimeANDROID(egl->display, enc_surface, get_time() - t0);
         eglSwapBuffers(egl->display, enc_surface);
     }
 
@@ -201,12 +195,19 @@ void draw(struct egl *egl, struct gl *gl, EGLSurface surface, EGLSurface enc_sur
         glVertexAttribPointer(gl->pos_oes, 2, GL_FLOAT, GL_FALSE, 0, vert);
         glEnableVertexAttribArray(gl->pos_oes);
 
-        glUniform4f(gl->texture_matrix_oes, 0.5f, -0.5f, 0.5f, 0.5f);
+        glUniformMatrix4fv(gl->texture_matrix_oes, 1, 1, matrix);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-        eglSwapBuffers(egl->display, surface);
 
-        glUniform4f(gl->texture_matrix_oes, 0.5f * (float) height / (float) width, -0.5f, 0.5f, 0.5f);
+        float m = (float) width / (float) height;
+        matmul(matrix, mtx, (float[]) {
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f,    m, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, (1.0f - m)/2.0f, 0.0f, 1.0f,
+        });
+
+        glUniformMatrix4fv(gl->texture_matrix_oes, 1, 1, matrix);
         glBindFramebuffer(GL_FRAMEBUFFER, gl->fbo);
         glViewport(0, 0, 227, 227);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -214,34 +215,39 @@ void draw(struct egl *egl, struct gl *gl, EGLSurface surface, EGLSurface enc_sur
         pthread_mutex_lock(&mutex);
         glReadPixels(0, 0, 227, 227, GL_RGBA, GL_UNSIGNED_BYTE, buf);
         pthread_mutex_unlock(&mutex);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        glViewport(0, 0, width, height);
+
+        float dx = 227.0f * 2.0f / width;
+        float dy = 227.0f * 2.0f / height;
+        float vert2[] = {-1.0f, -1.0f,
+                        -1.0f, -1.0f + dy,
+                        -1.0f + dx, -1.0f,
+                        -1.0f + dx, -1.0f + dy};
+
+        glUseProgram(gl->program);
+        glUniform1i(gl->texture, 0);
+        glBindTexture(GL_TEXTURE_2D, gl->fbo_texture);
+
+        glVertexAttribPointer(gl->pos, 2, GL_FLOAT, GL_FALSE, 0, vert2);
+        glEnableVertexAttribArray(gl->pos);
+
+
+        glUniformMatrix4fv(gl->texture_matrix, 1, 1, (float[]) {
+            2.0f / dx, 0.0f, 0.0f, 0.0f,
+            0.0f, 2.0f / dy, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f,
+        });
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        eglSwapBuffers(egl->display, surface);
     }
 }
 
-typedef struct {
-    void *ptr;
-    size_t size;
-} string;
-
-static int file_mmap(string *res, char *path)
-{
-    int fd;
-    struct stat stat;
-    void *map;
-
-    fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return -1;
-
-    map = fstat(fd, &stat) ?
-        MAP_FAILED :
-        mmap(0, stat.st_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
-    close(fd);
-    if (map == MAP_FAILED)
-        return -1;
-
-    *res = (string) {map, stat.st_size};
-    return 0;
-}
+#include "../util.h"
 
 ANativeWindow *window, *enc_window;
 EGLSurface surface, enc_surface;
@@ -249,102 +255,59 @@ int camera_texture;
 struct egl egl;
 struct gl gl;
 
-string weights_bwn;
+int network_id;
+
+string weights, weights_bwn;
 
 pthread_t thread;
 
-#include "../xnornet_bwn_bnn.h"
+#include "../xnornet_bwn.h"
+#include "../xnornet.h"
 
 #include "../rpi-demo/names2.h"
-
-__attribute__ ((always_inline))
-static void softmax(float *out)
-{
-    uint i, j;
-    double d, q;
-
-    for (i = 0, d = 0.0, q = -INFINITY; i < 1000; i++) {
-        d += exp((double) out[i] / 1.0);
-        if (q < out[i]) {
-            q = out[i];
-            j = i;
-        }
-    }
-
-    for (i = 0; i < 1000; i++)
-        out[i] = (exp((double) out[i] / 1.0) / d);
-}
 
 void* work_thread(void *arg)
 {
     static float buf_in[227*227*3] __attribute__ ((aligned(16)));
-    static uint8_t tmpbuf[xnornet_bwn_tmp_size] __attribute__ ((aligned(16)));
+    static uint8_t tmpbuf[xnornet_bwn_tmp_size] __attribute__ ((aligned(16))); // TODO
     float *y;
-    int i, j, top[5];
-
-    float mm[] = {0.01735949, 0.01772787, 0.01774145};
-    float b[] = {-2.13645733, -2.04468092, -1.81410977};
+    int i, j, top[5], id;
 
     while (1) {
         pthread_mutex_lock(&mutex);
+        if (paused)
+            pthread_cond_wait(&cond, &mutex);
+
         for (i = 0; i < 227; i++) for (j = 0; j < 227; j++) {
-            buf_in[i*227*3+(226-j)*3+0] = (float) buf[j*227*4+i*4+0] * mm[0] + b[0];
-            buf_in[i*227*3+(226-j)*3+1] = (float) buf[j*227*4+i*4+1] * mm[1] + b[1];
-            buf_in[i*227*3+(226-j)*3+2] = (float) buf[j*227*4+i*4+2] * mm[2] + b[2];
+            float m[] = {0.01735949, 0.01772787, 0.01774145};
+            float b[] = {-2.13645733, -2.04468092, -1.81410977};
+            buf_in[i*227*3+(226-j)*3+0] = (float) buf[j*227*4+i*4+0] * m[0] + b[0];
+            buf_in[i*227*3+(226-j)*3+1] = (float) buf[j*227*4+i*4+1] * m[1] + b[1];
+            buf_in[i*227*3+(226-j)*3+2] = (float) buf[j*227*4+i*4+2] * m[2] + b[2];
         }
+
+        id = network_id;
+
         pthread_mutex_unlock(&mutex);
 
-        /*{
-            string test;
-            file_mmap(&test, "/sdcard/image");
-            float *buf = test.ptr;
-            for (i = 0; i < 227*227*3; i++)
-                buf_in[i] = buf[i] * mm[i % 3] + b[i % 3];
-        }*/
+        if (network_id == 0)
+            y = xnornet_bwn(buf_in, weights_bwn.ptr, tmpbuf);
+        else
+            y = xnornet(buf_in, weights.ptr, tmpbuf);
 
-        y = xnornet_bwn(buf_in, weights_bwn.ptr, tmpbuf);
-        softmax(y);
-
-        for (i = 0; i < 1000; i++) {
-            for (j = 0; j < 5 && j < i && y[top[j]] >= y[i]; j++);
-
-            if (j == 0) {
-                top[4] = top[3];
-                top[3] = top[2];
-                top[2] = top[1];
-                top[1] = top[0];
-                top[0] = i;
-            }
-
-            if (j == 1) {
-                top[4] = top[3];
-                top[3] = top[2];
-                top[2] = top[1];
-                top[1] = i;
-            }
-
-            if (j == 2) {
-                top[4] = top[3];
-                top[3] = top[2];
-                top[2] = i;
-            }
-
-            if (j == 3) {
-                top[4] = top[3];
-                top[3] = i;
-            }
-
-            if (j == 4) {
-                top[4] = i;
-            }
-        }
+        softmax(y, 1000);
+        top5(top, y, 1000);
 
         pthread_mutex_lock(&mutex_out);
-        sprintf(out_string,"%s:%f\n%s:%f\n%s:%f\n%s:%f\n%s:%f\n", names[top[0]], y[top[0]],
+
+        sprintf(out_string,"Network: %s\n%s:%f\n%s:%f\n%s:%f\n%s:%f\n%s:%f\n",
+            (char*[]) {"BWN","XNORNET"}[network_id],
+            names[top[0]], y[top[0]],
             names[top[1]], y[top[1]],
             names[top[2]], y[top[2]],
             names[top[3]], y[top[3]],
             names[top[4]], y[top[4]]);
+
         pthread_mutex_unlock(&mutex_out);
     }
 }
@@ -377,6 +340,9 @@ jni(int, init, jobject _surface)
     ret = file_mmap(&weights_bwn, "/sdcard/xnornet_bwn_weights");
     assert(!ret && weights_bwn.size == xnornet_bwn_size);
 
+    ret = file_mmap(&weights, "/sdcard/xnornet_weights");
+    assert(!ret && weights.size == xnornet_size);
+
     t0 = get_time();
 
     pthread_create(&thread, 0, work_thread, 0);
@@ -389,11 +355,28 @@ jni0(int, exit)
     return 0;
 }
 
-jni(void, draw, int encode)
+jni(void, draw, jfloatArray mtx)
 {
+    float *m;
+
+    m = (*env)->GetFloatArrayElements(env, mtx, 0);
+
     //assert(enc_window);
-    draw(&egl, &gl, surface, encode ? enc_surface : 0);
+    draw(&egl, &gl, m, surface, 0);
     //eglMakeCurrent(egl.display, 0, 0, 0);
+
+    (*env)->ReleaseFloatArrayElements(env, mtx, m, 0);
+}
+
+jni(void, encode, jfloatArray mtx)
+{
+    float *m;
+
+    m = (*env)->GetFloatArrayElements(env, mtx, 0);
+
+    draw(&egl, &gl, m, 0, enc_surface);
+
+    (*env)->ReleaseFloatArrayElements(env, mtx, m, 0);
 }
 
 jni0(jstring, getoverlay)
@@ -421,9 +404,18 @@ jni(void, setcodecsurface, jobject _surface)
     eglMakeCurrent(egl.display, enc_surface, enc_surface, egl.context);
 }
 
+void set_paused(int pause)
+{
+    pthread_mutex_lock(&mutex);
+    paused = pause;
+    if (!pause)
+        pthread_cond_broadcast(&cond);
+    pthread_mutex_unlock(&mutex);
+}
+
 jni(void, created, jobject _surface)
 {
-    printf("created\n");
+    set_paused(0);
 
     window = ANativeWindow_fromSurface(env, _surface);
     assert(window);
@@ -441,11 +433,20 @@ jni(void, changed, jobject surface, int format, int width, int height)
 
 jni(void, destroyed, jobject null)
 {
+    set_paused(1);
+
     eglDestroySurface(egl.display, surface);
     ANativeWindow_release(window);
 
     window = 0;
     surface = 0;
+}
+
+jni(void, setnetwork, jint id)
+{
+    pthread_mutex_lock(&mutex);
+    network_id = id;
+    pthread_mutex_unlock(&mutex);
 }
 
 /* keep a lists of frames which start with keyframes to create clips
@@ -468,15 +469,18 @@ uint8_t codec_config[256];
 int codec_config_size;
 int64_t last_timestamp;
 
+#define RING_SIZE 8 // currently used as lazy way to determine clip length
+
 struct {
     int first, last;
-    struct frames data[256];
+    struct frames data[RING_SIZE];
 } frames;
 
 jni(void, addbuffer, jobject buf, int offset, int size, int64_t timestamp, int flags)
 {
     struct frames *f;
     void *ptr;
+    int i;
 
     last_timestamp = timestamp;
 
@@ -489,11 +493,25 @@ jni(void, addbuffer, jobject buf, int offset, int size, int64_t timestamp, int f
         assert(size < 256);
         memcpy(codec_config, ptr + offset, size);
         codec_config_size = size;
+        // clear everything
+        for (i = frames.first;; ) {
+            f = &frames.data[i];
+            free(f->data);
+            free(f->info);
+            f->data = 0;
+            f->info = 0;
+            f->num_frame = 0;
+            f->data_size = 0;
+            if (i == frames.last)
+                break;
+            i = (i + 1) % RING_SIZE;
+        }
+        frames.first = frames.last;
         return;
     }
 
     if (flags == FLAG_KEY_FRAME) {
-        frames.last = (frames.last + 1) % 8;
+        frames.last = (frames.last + 1) % RING_SIZE;
         if (frames.last == frames.first) {
             f = &frames.data[frames.first];
             free(f->data);
@@ -502,7 +520,7 @@ jni(void, addbuffer, jobject buf, int offset, int size, int64_t timestamp, int f
             f->info = 0;
             f->num_frame = 0;
             f->data_size = 0;
-            frames.first = (frames.first + 1) % 8;
+            frames.first = (frames.first + 1) % RING_SIZE;
         }
     }
 
@@ -527,13 +545,16 @@ jni(void, writemux, jstring path)
     struct frames *f;
     int i, j, fd;
 
-    fd = open("/sdcard/clip.mp4", O_WRONLY | O_CREAT, 0666);
+    const char *path_c = (*env)->GetStringUTFChars(env, path, 0);
+    assert(path_c);
+
+    fd = open(path_c, O_WRONLY | O_CREAT, 0666);
     assert(fd >= 0);
+
+    (*env)->ReleaseStringUTFChars(env, path, path_c);
 
     mux = AMediaMuxer_new(fd, AMEDIAMUXER_OUTPUT_FORMAT_MPEG_4);
     assert(mux);
-
-    printf("starting clip\n");
 
     {
         AMediaFormat *fmt;
@@ -541,23 +562,31 @@ jni(void, writemux, jstring path)
         fmt = AMediaFormat_new();
 
         AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "video/avc");
+
+        //
         AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, 640);
         AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_HEIGHT, 480);
 
+        // native media muxer doesnt support codec config sample data..
+        // hack around it
 
-        for (i = 0; i < codec_config_size; i++)
-            printf("csd %X, %i\n", codec_config[i], i);
+        int split = -1;
+        for (i = 4; i < codec_config_size - 3; i++) {
+            if (!memcmp(codec_config + i, (char[]) {0, 0, 0, 1}, 4)) {
+                split = i;
+                break;
+            }
+        }
+        assert(split >= 0);
 
-        AMediaFormat_setBuffer(fmt, "csd-0", codec_config, 17);
-        AMediaFormat_setBuffer(fmt, "csd-1", codec_config+17, 25-17);
+        AMediaFormat_setBuffer(fmt, "csd-0", codec_config, split);
+        AMediaFormat_setBuffer(fmt, "csd-1", codec_config + split, codec_config_size - split);
 
         track = AMediaMuxer_addTrack(mux, fmt);
         assert(track >= 0);
 
         AMediaFormat_delete(fmt);
     }
-
-    printf("starting clip %i\n", codec_config_size);
 
     AMediaMuxer_start(mux);
 
@@ -571,7 +600,7 @@ jni(void, writemux, jstring path)
             AMediaMuxer_writeSampleData(mux, track, f->data, &f->info[j]);
         if (i == frames.last)
             break;
-        i = (i + 1) % 8;
+        i = (i + 1) % RING_SIZE;
     }
 
     AMediaMuxer_stop(mux);

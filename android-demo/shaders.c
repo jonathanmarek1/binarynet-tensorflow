@@ -3,10 +3,10 @@
 
 char *vertex_shader =
     "attribute vec2 pos;\n"
-    "uniform vec4 texmat;\n"
+    "uniform mat4 texmat;\n"
     "varying vec2 coord;\n"
     "void main() {\n"
-    "  coord = pos * texmat.xy + texmat.zw;\n"
+    "  coord = (vec4((pos + vec2(1.0, 1.0)) * 0.5, 0.0, 1.0) * texmat).xy;\n"
     "  gl_Position = vec4(pos, 0.0, 1.0);\n"
     "}\n";
 
