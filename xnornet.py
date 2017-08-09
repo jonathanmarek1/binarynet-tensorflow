@@ -14,6 +14,7 @@ import bnn
 import tf_export
 
 BWN = True
+quantize = True
 
 cache = load_lua('data/cache/meanstdCache.t7')
 model = load_lua('data/alexnet_BWN.t7' if BWN else 'data/alexnet_XNOR.t7')
@@ -25,12 +26,13 @@ x = (x0 * (1.0 / 255.0) - np.array(cache.mean)) * (1.0 / np.array(cache.std))
 
 x = tf.pad(x, [[0, 0], [2, 2], [2, 2], [0, 0]], 'CONSTANT')
 
-if BWN:
-    x, x1 = bnn.layer2(x, 96, filter_size=[11, 11], stride=[4, 4], pool=([3, 3], [2, 2]), epsilon=0.001, binary=False, padding='VALID', activate='relu')
 
-else:
-    # TODO
-    x = bnn.layer_xnornet0(x, 96, filter_size=[11, 11], stride=[4, 4], pool=([3, 3], [2, 2]), epsilon=0.00001, binary=False, padding='VALID')
+x = bnn.layer(x, 96, filter_size=[11, 11], stride=[4, 4], pool=([3, 3], [2, 2]),
+ epsilon=0.001 if BWN else 0.00001, binary=False, padding='VALID', activate='relu')
+
+if not BWN:
+    x = bnn.batch_norm(x, 0.0001)
+    x = bnn.activation(x)
 
 if BWN:
     act = 'relu'
@@ -134,14 +136,27 @@ with tf.Session() as sess:
         load_conv_param('Variable_17:0', 'Variable_19:0', model.modules[9].modules[2])
         load_conv_param('Variable_20:0', 'Variable_21:0', model.modules[12])
 
-    output, x1 = sess.run([softmax, x1], feed_dict={x0 : img, train: False})
-
-    print(x1[0,0,0,0], np.max(x1))
-
+    output = sess.run(softmax, feed_dict={x0 : img, train: False})
     output = output[0,0,0,:]
+
+    """
+    for i in range(3):
+        k = 0
+        for j in range(32):
+            if x1[0,0,0,i*32+j] < 0:
+                k |= (128 >> (j % 8)) << (j // 8 * 8)
+        print('%X' % k)
+
+    print(x1[0,0,0,0])
+    """
 
     order = sorted(range(len(output)), key=lambda x: output[x], reverse=True)
     for i in range(5):
         print(order[i], output[order[i]])
 
-    tf_export.export(y, x0, 'xnornet_bwn' if BWN else 'xnornet', True)
+    name = 'xnornet'
+    if BWN:
+        name += '_bwn'
+    if quantize:
+        name += '_q'
+    tf_export.export(y, x0, name, quantize)

@@ -9,7 +9,7 @@ mkdir build build/test build/lib build/lib/$ARCH
 
 clang-5.0 -Wall -nostdlib -shared -Ofast -flto -fuse-ld=lld-5.0 -I$NDK/include -L$NDK/lib $CFLAGS -DNUM_THREAD=1 \
     -lc -llog -lGLESv2 -landroid -lmediandk \
-     *.c ../xnornet_bwn_bnn.c -I../ \
+     *.c ../xnornet_bwn.c ../xnornet.c ../util.c -I../ \
     -o build/lib/$ARCH/libhello-jni.so
 
 

@@ -1,6 +1,15 @@
+#ifdef __aarch64__
+#define for_each_reg(f) f(0) f(1) f(2) f(3) f(4) f(5) f(6) f(7) f(8) f(9) f(10) f(11) \
+              f(12) f(13) f(14) f(15) f(16) f(17) f(18) f(19) f(20) f(21) f(22) f(23)
+#define for_each_reg2(f) f(0) f(1) f(2) f(3) f(4) f(5) f(6) f(7) f(8) f(9) f(10) f(11) \
+              f(12) f(13) f(14) f(15) f(16) f(17) f(18) f(19) f(20) f(21) f(22) f(23)
+#else
+#define for_each_reg(f) f(0) f(1) f(2) f(3) f(4) f(5) f(6) f(7) f(8)
+#define for_each_reg2(f) f(0) f(1) f(2) f(3) f(4) f(5) f(6) f(7) f(8)
+#endif
 
-#define for_each_reg(f) f(0) f(1) f(2) f(3) f(4) f(5) f(6) f(7) f(8) f(9) f(10) f(11) f(12) f(13) f(14) f(15) f(16) f(17) f(18) f(19) f(20) f(21) f(22) f(23)
-
+// float
+// see google's gemmlowp for faster implementation using assembly
 #define float_op(x) if (x < num_reg) \
     v##x = vreinterpretq_u8_f32(vmlaq_f32(vreinterpretq_f32_u8(v##x), in0, *_w++));
 
@@ -14,6 +23,8 @@
     } \
 })
 
+// int8
+// could accumulate two 16bit results with a single pairwise accumulate instead of 2x addw
 #define int8_op(x) if (x < num_reg) ({ \
     int16x8_t t[4]; \
     t[0] = vmull_s8(vget_low_s8(_w[x /8*4]), in0); \
@@ -52,6 +63,8 @@
     } \
 })
 
+// XOR
+// TODO
 #define bin_op(x) if (x < num_reg) ({ \
     uint8x16_t tmp = vcntq_u8(_w[x / 2] ^ in0); \
     v##x = vreinterpretq_u8_u16(vaddw_u8(vreinterpretq_u16_u8(v##x), (x & 1) ? vget_high_u8(tmp) : vget_low_u8(tmp))); \
@@ -69,6 +82,8 @@
     } \
 })
 
+// float-binary
+// debinarization is costly
 #define float_bin_op(x) if (x < num_reg) ({ \
     float32x4_t sel; \
     uint32x4_t tmp[4]; \
@@ -98,19 +113,35 @@
 })
 
 
-//uint8x8x2_t uz = vuzp_u8(vreinterpret_u8_u16(vdup_n_u16(_w[x/4])), vreinterpret_u8_u16(vdup_n_u16(_w[x/4])))
-//int8x16_t m = vreinterpretq_s8_u8(vtstq_u8(vcombine_u8(uz.val[0], uz.val[1]), mask));
-
-//    asm ("cmtst %[a].16b, %[a].16b, %[b].16b\n" : [a] "+w"(m), [b] "+w"(mask) ::);
+// uint8-binary
+// 1. debinarize into 8-bit masks with cmtst
+// 2. multiply by 0/1 using AND instruction (the result must be corrected later)
+// 3. accumulate pairwise into 16-bit accumulators
+// -accumulate up to 256 results into 16-bit registers then add to 32-bit register
+// -in some cases only 16-bit accumulators would be needed..
+// -clang likes to replace cmtst instruction with slower sequences...
+//
+#ifdef __aarch64__
+#define int8_bin_op(x) if (x < num_reg / 2) ({ \
+    uint8x16_t m = vreinterpretq_u8_u16(vdupq_n_u16(_w[x])); \
+    asm ("cmtst %[a].16b, %[a].16b, %[b].16b\n" : [a] "+w"(m), [b] "+w"(mask) ::); \
+    tmp##x = vpadalq_u8(tmp##x, m & in0); \
+});
+#else
 #define int8_bin_op(x) if (x < num_reg / 2) ({ \
     uint8x16_t m = vreinterpretq_u8_u16(vdupq_n_u16(_w[x])); \
     m = vtstq_u8(m, mask); \
-    tmp[x] = vpadalq_u8(tmp[x], m & in0); \
+    tmp##x = vpadalq_u8(tmp##x, m & in0); \
 });
+#endif
+
+#define readtmp(x) if (_x == x) r = tmp##x;
+#define deftmp(x) uint16x8_t tmp##x = {};
 
 #define int8_bin_op2(x) if (x < num_reg) ({ \
+    uint16x8_t t = ({ int _x = (x/2); uint16x8_t r; for_each_reg2(readtmp); r; }); \
     v##x = vreinterpretq_u8_u32(vaddw_u16(vreinterpretq_u32_u8(v##x), \
-           (x & 1) ? vget_high_u16(tmp[x/2]) : vget_low_u16(tmp[x/2]))); \
+           (x & 1) ? vget_high_u16(t) : vget_low_u16(t))); \
 });
 
 #define int8_bin_kernel(in, weight, depth) ({ \
@@ -120,8 +151,7 @@
     uint _d = (depth); \
     int z, i; \
     for (z = 0; z < _d / 2; ) { \
-        uint16x8_t tmp[num_reg / 2]; \
-        for (i = 0; i < num_reg / 2; i++) tmp[i] = (uint16x8_t) {}; \
+        for_each_reg(deftmp); \
         for (i = 0; i < 128 && z < _d / 2; i++, z++) { \
             uint8x16_t in0 = vreinterpretq_u8_u16(vdupq_n_u16(_i[z])); \
             for_each_reg(int8_bin_op); \
