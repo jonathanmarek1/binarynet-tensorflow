@@ -329,10 +329,10 @@ def export(output, input, prefix, quantize):
                 assert(layer.wb.shape[3] % group_size == 0)
                 wd = np.packbits(reorder(layer.wb, group_size, 8))
             else:
-                # float input with binary out
+                # float input with binary weights
                 assert(layer.wb.shape[3] % group_size == 0)
-                assert(layer.wb.shape[2] % 2 == 0)
                 if quantize:
+                    assert(layer.wb.shape[2] % 2 == 0)
                     assert(group_size % 8 == 0)
 
                     x = layer.wb
@@ -341,7 +341,7 @@ def export(output, input, prefix, quantize):
                     x = np.transpose(x, (0, 1, 4, 2, 5, 3, 6))
                     wd = np.packbits(x)
                 else:
-                    wd = np.packbits(reorder(layer.wb, group_size, 2))
+                    wd = np.packbits(reorder(layer.wb, group_size, 1))
         else:
             if quantize:
                 wd = reorder(layer.w, group_size, 1).astype(np.int8)

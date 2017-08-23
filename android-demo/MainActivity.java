@@ -21,13 +21,12 @@ when the "snapshot" button is pressed, a filename /sdcard/clipXXXXX.mp4 is gener
 where XXXXX is an incremental value stored using preferences, and passed on to native
 code which creates the mp4 file
 
-some TODOs:
+TODO:
 -detect cameras and resolutions instead of hardcoded options
 -way to stop clip (currently possible by pausing and resuming activity)
 -add some user control over codec parameters
 -split preferences stuff into seperate class
 -some cleaning up
--NETWORK SELECT
 */
 
 package test.app;
@@ -49,6 +48,7 @@ import javax.microedition.khronos.opengles.GL10;
 import javax.microedition.khronos.egl.*;
 import java.io.*;
 import java.nio.ByteBuffer;
+import java.util.HashMap;
 
 public class MainActivity extends Activity implements SurfaceHolder.Callback2,
     SharedPreferences.OnSharedPreferenceChangeListener {
@@ -73,6 +73,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback2,
                                  long timestamp, int flags);
     static native void writemux(String path);
 
+    static native void drag(float x0, float y0, float x1, float y1);
+
     static native String getoverlay();
 
     static String TAG = "MainActivityTESTAPP";
@@ -85,7 +87,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback2,
     Surface surface;
     SurfaceTexture surface_texture;
 
-    SurfaceView mView;
+    SurfaceView view;
     boolean have_surface = false, draw_called = false;
 
     TextView overlay;
@@ -301,6 +303,43 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback2,
         }
     };
 
+    HashMap<Integer,MotionEvent.PointerCoords> prev =
+        new HashMap<Integer,MotionEvent.PointerCoords>();
+
+    final View.OnTouchListener touch_listener = new View.OnTouchListener() {
+        @Override
+        public boolean onTouch(View v, MotionEvent event) {
+            int i = event.getActionIndex();
+            int id = event.getPointerId(i);
+            MotionEvent.PointerCoords coord;
+            switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                coord = new  MotionEvent.PointerCoords();
+                event.getPointerCoords(i, coord);
+                prev.put(id, coord);
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                prev.remove(id);
+                break;
+            case MotionEvent.ACTION_MOVE:
+                for (i = 0; i < event.getPointerCount(); i++) {
+                    id = event.getPointerId(i);
+
+                    coord = prev.get(id);
+                    float x = coord.x, y = coord.y;
+                    event.getPointerCoords(i, coord);
+
+                    //printf("%d %f %f %f %f", id, x, y, coord.x, coord.y);
+                    drag(x, y, coord.x, coord.y);
+                }
+                break;
+            }
+            return true;
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -326,10 +365,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback2,
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT);
         params.gravity = Gravity.TOP | Gravity.LEFT;
 
-        mView = new SurfaceView(this);
-        mView.getHolder().addCallback(this);
+        view = new SurfaceView(this);
+        view.getHolder().addCallback(this);
+        view.setOnTouchListener(touch_listener);
 
-        setContentView(mView);
+        setContentView(view);
         addContentView(overlay, params);
 
         button = new ImageButton(this);

@@ -124,7 +124,7 @@ static tensor conv2d(tensor input, tensor filter, tensor out_b, uint sx, uint sy
 #define f(x) register uint8x16_t v##x;
     for_each_reg(f)
 #undef f
-#if 0 //def __aarch64__
+#ifdef __aarch64__
 #define v_ptr (uint8x16_t[]) {v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23}
     int split_size = accum16 ? 128 : 96;
     int split_num = (filter.shape[3] - 1) / split_size + 1;
@@ -246,6 +246,8 @@ static tensor conv2d(tensor input, tensor filter, tensor out_b, uint sx, uint sy
         tmp = tmp + ((float32x4_t*)m)[x]; \
     else if (filter.type == INT8 && input.type == INT8) \
         tmp = vmulq_n_f32(tmp + ((float32x4_t*)c)[x] * vdupq_n_f32(sum2) + vdupq_n_f32(qp[1]) * ((float32x4_t*)d)[x], qp[0]) * ((float32x4_t*)b)[x] + ((float32x4_t*)m)[x]; \
+    else if (input.type == FLOAT) \
+        tmp = tmp * ((float32x4_t*)m)[x] + ((float32x4_t*)b)[x];\
     else \
         tmp = tmp * vmulq_n_f32(((float32x4_t*)m)[x], qp[0]) + ((float32x4_t*)b)[x]; \
     if (activation == ACTIVE_RELU) \

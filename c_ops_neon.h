@@ -8,10 +8,94 @@
 #define for_each_reg2(f) f(0) f(1) f(2) f(3) f(4) f(5) f(6) f(7) f(8)
 #endif
 
+#define touch_reg(x) asm ("" : "+w"(v##x) ::);
+
 // float
-// see google's gemmlowp for faster implementation using assembly
-#define float_op(x) if (x < num_reg) \
-    v##x = vreinterpretq_u8_f32(vmlaq_f32(vreinterpretq_f32_u8(v##x), in0, *_w++));
+#ifdef __aarch64__
+// cortexa53 implementation based on google's gemmlowp
+#define reg_use(x) , "+w"(v##x)
+#define float_f(a, w, wn, wnn, x0, off) \
+    "ldr "wnn", [%[w], #("#off"*16)]\n" \
+    "ins "wn".d[1], "x0"\n" \
+    "fmla "a".4s, "w".4s, v31.s[0]\n" \
+    "ldr "x0", [%[w], #("#off"*16+8)]\n"
+
+#define float_kernel(i, weight, depth) ({ \
+    void *_input = i; \
+    void *_filter = weight; \
+    uint _size = depth; \
+    _assert(_size >= 2); \
+    _size -= 1; \
+    asm volatile ( \
+"ld1 {v24.4s}, [%[w]]\n" \
+"ldr d25, [%[w], #16]\n" \
+"ldr x0, [%[w], #24]\n" \
+"ldr d26, [%[w], #32]\n" \
+"ldr x1, [%[w], #40]\n" \
+"add %[w], %[w], #48\n" \
+"ld1r {v31.4s}, [%[in]], #4\n" \
+"2:\n" \
+    float_f("v0", "v24", "v25", "d27", "x0", 0) \
+    float_f("v1", "v25", "v26", "d24", "x1", 1) \
+    float_f("v2", "v26", "v27", "d25", "x0", 2) \
+    float_f("v3", "v27", "v24", "d26", "x1", 3) \
+    float_f("v4", "v24", "v25", "d27", "x0", 4) \
+    float_f("v5", "v25", "v26", "d24", "x1", 5) \
+    float_f("v6", "v26", "v27", "d25", "x0", 6) \
+    float_f("v7", "v27", "v24", "d26", "x1", 7) \
+    float_f("v8", "v24", "v25", "d27", "x0", 8) \
+    float_f("v9", "v25", "v26", "d24", "x1", 9) \
+    float_f("v10", "v26", "v27", "d25", "x0", 10) \
+    float_f("v11", "v27", "v24", "d26", "x1", 11) \
+    float_f("v12", "v24", "v25", "d27", "x0", 12) \
+    float_f("v13", "v25", "v26", "d24", "x1", 13) \
+    float_f("v14", "v26", "v27", "d25", "x0", 14) \
+    float_f("v15", "v27", "v24", "d26", "x1", 15) \
+    float_f("v16", "v24", "v25", "d27", "x0", 16) \
+    float_f("v17", "v25", "v26", "d24", "x1", 17) \
+    float_f("v18", "v26", "v27", "d25", "x0", 18) \
+    float_f("v19", "v27", "v24", "d26", "x1", 19) \
+    float_f("v20", "v24", "v25", "d27", "x0", 20) \
+    float_f("v21", "v25", "v26", "d24", "x1", 21) \
+    float_f("v22", "v26", "v27", "d25", "x0", 22) \
+    float_f("v23", "v27", "v24", "d26", "x1", 23) \
+    "ld1r {v31.4s}, [%[in]], #4\n" \
+    "add %[w], %[w], #(4*96)\n" \
+    "subs %w[d], %w[d], #1\n" \
+    "bne 2b\n" \
+float_f("v0", "v24", "v25", "d27", "x0", 0) \
+float_f("v1", "v25", "v26", "d24", "x1", 1) \
+float_f("v2", "v26", "v27", "d25", "x0", 2) \
+float_f("v3", "v27", "v24", "d26", "x1", 3) \
+float_f("v4", "v24", "v25", "d27", "x0", 4) \
+float_f("v5", "v25", "v26", "d24", "x1", 5) \
+float_f("v6", "v26", "v27", "d25", "x0", 6) \
+float_f("v7", "v27", "v24", "d26", "x1", 7) \
+float_f("v8", "v24", "v25", "d27", "x0", 8) \
+float_f("v9", "v25", "v26", "d24", "x1", 9) \
+float_f("v10", "v26", "v27", "d25", "x0", 10) \
+float_f("v11", "v27", "v24", "d26", "x1", 11) \
+float_f("v12", "v24", "v25", "d27", "x0", 12) \
+float_f("v13", "v25", "v26", "d24", "x1", 13) \
+float_f("v14", "v26", "v27", "d25", "x0", 14) \
+float_f("v15", "v27", "v24", "d26", "x1", 15) \
+float_f("v16", "v24", "v25", "d27", "x0", 16) \
+float_f("v17", "v25", "v26", "d24", "x1", 17) \
+float_f("v18", "v26", "v27", "d25", "x0", 18) \
+float_f("v19", "v27", "v24", "d26", "x1", 19) \
+float_f("v20", "v24", "v25", "d27", "x0", 20) \
+"ins v26.d[1], x1\n" \
+"fmla v21.4s, v25.4s, v31.s[0]\n" \
+"ins v27.d[1], x0\n" \
+"fmla v22.4s, v26.4s, v31.s[0]\n" \
+"fmla v23.4s, v27.4s, v31.s[0]\n" \
+    : [d] "+r"(_size), [w] "+r"(_filter), [in] "+r"(_input) for_each_reg(reg_use): \
+    : "cc", "x0", "x1", "v24", "v25", "v26", "v27", "v31"); \
+})
+#else
+#define float_op(x) if (x < num_reg) ({ \
+    v##x = vreinterpretq_u8_f32(vmlaq_f32(vreinterpretq_f32_u8(v##x), in0, *_w++)); \
+});
 
 #define float_kernel(in, weight, depth) ({ \
     float *_i = (void*) (in); \
@@ -22,6 +106,7 @@
         for_each_reg(float_op) \
     } \
 })
+#endif
 
 // int8
 // could accumulate two 16bit results with a single pairwise accumulate instead of 2x addw

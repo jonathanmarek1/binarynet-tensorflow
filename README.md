@@ -53,13 +53,13 @@ The convolution function is optimized for the case of a fully-connected layer wi
 
 2 ops = 1 equivalent multiply-add operation
 
-| Convolution type | Weight size | Gops on Nexus 5 | Gops on RPi 3 |
+| Convolution type | Weight bits | Gops on Nexus 5 | Gops on RPi 3 |
 | --- | --- | --- | --- |
-| Float | 32 | ?? | ?? |
-| Int8 | 8 | ?? | ?? |
-| Float-binary | 1 | ?? | ?? |
-| Int8-binary | 1 | ?? | ?? |
-| Binary | 1 | ?? | ?? |
+| Float | 32 | 0.617 | 1.14 |
+| Int8 | 8 | 9.99 | 4.06 |
+| Float-binary | 1 | 3.18 | 2.39 |
+| Int8-binary | 1 | 12.6 | 4.21 |
+| Binary | 1 | 62.4 | 38.8 |
 
 * Single thread performance
 * Nexus 5: 2.3 GHz Krait 400

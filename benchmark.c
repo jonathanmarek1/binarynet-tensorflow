@@ -13,8 +13,13 @@ static uint8_t data[benchmark_float_size] __attribute__((aligned(16)));
 static uint8_t x[1024*1024] __attribute__((aligned(16)));
 static uint8_t tmp[1024*1024] __attribute__((aligned(16)));
 
+#include <sched.h>
+
 int main(void)
 {
+    int r = sched_setscheduler(getpid(), SCHED_FIFO, &(struct sched_param) {.sched_priority = 1});
+    printf("sched_setscheduler %i\n", r);
+
     printf("float:\n");
     benchmark_float(x, data, tmp);
     printf("int8:\n");
