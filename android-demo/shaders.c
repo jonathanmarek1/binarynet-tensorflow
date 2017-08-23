@@ -14,8 +14,9 @@ char *fragment_shader =
     "precision mediump float;\n"
     "varying vec2 coord;\n"
     "uniform sampler2D tex;\n"
+    "uniform vec4 color;\n"
     "void main() {\n"
-    "  gl_FragColor = vec4(texture2D(tex, coord).rgb, 1.0);\n"
+    "  gl_FragColor = vec4(texture2D(tex, coord).rgb * color.a + color.rgb, 1.0);\n"
     "}\n";
 
 char *fragment_shader_oes =

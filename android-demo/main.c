@@ -40,7 +40,7 @@ struct egl {
 
 struct gl {
     GLuint program, program_oes;
-    GLuint pos, texture, texture_matrix;
+    GLuint pos, texture, texture_matrix, color;
     GLuint pos_oes, texture_oes, texture_matrix_oes;
     GLuint camera_texture, fbo_texture;
     GLuint fbo;
@@ -56,6 +56,10 @@ char out_string[1024] = "nothing.. yet";
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_out = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+struct {
+    float x0, y0, x1, y1;
+} box;
 
 static uint64_t get_time(void)
 {
@@ -106,6 +110,7 @@ void gl_init(struct egl *egl, struct gl *gl, EGLSurface surface)
     gl->pos = glGetAttribLocation(gl->program, "pos");
     gl->texture = glGetUniformLocation(gl->program, "tex");
     gl->texture_matrix = glGetUniformLocation(gl->program, "texmat");
+    gl->color = glGetUniformLocation(gl->program, "color");
 
     gl->pos_oes = glGetAttribLocation(gl->program_oes, "pos");
     gl->texture_oes = glGetUniformLocation(gl->program_oes, "tex");
@@ -201,10 +206,10 @@ void draw(struct egl *egl, struct gl *gl, float *mtx,
 
         float m = (float) width / (float) height;
         matmul(matrix, mtx, (float[]) {
-            1.0f, 0.0f, 0.0f, 0.0f,
-            0.0f,    m, 0.0f, 0.0f,
+            (box.x1 - box.x0)/2.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, (box.y1 - box.y0)/2.0f, 0.0f, 0.0f,
             0.0f, 0.0f, 1.0f, 0.0f,
-            0.0f, (1.0f - m)/2.0f, 0.0f, 1.0f,
+            (1.0f + box.x0)/2.0f, (1.0f + box.y0)/2.0f, 0.0f, 1.0f,
         });
 
         glUniformMatrix4fv(gl->texture_matrix_oes, 1, 1, matrix);
@@ -229,6 +234,8 @@ void draw(struct egl *egl, struct gl *gl, float *mtx,
 
         glUseProgram(gl->program);
         glUniform1i(gl->texture, 0);
+        glUniform4f(gl->color, 0.0f, 0.0f, 0.0f, 1.0f);
+
         glBindTexture(GL_TEXTURE_2D, gl->fbo_texture);
 
         glVertexAttribPointer(gl->pos, 2, GL_FLOAT, GL_FALSE, 0, vert2);
@@ -242,6 +249,19 @@ void draw(struct egl *egl, struct gl *gl, float *mtx,
             0.0f, 0.0f, 0.0f, 1.0f,
         });
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        float vert3[] = {
+            box.x0, box.y0,
+            box.x1, box.y0,
+            box.x1, box.y1,
+            box.x0, box.y1
+        };
+        glVertexAttribPointer(gl->pos, 2, GL_FLOAT, GL_FALSE, 0, vert3);
+
+
+        glUniform4f(gl->color, 1.0f, 0.0f, 0.0f, 0.0f);
+        glLineWidth(5.0f);
+        glDrawArrays(GL_LINE_LOOP, 0, 4);
 
         eglSwapBuffers(egl->display, surface);
     }
@@ -287,6 +307,16 @@ void* work_thread(void *arg)
         }
 
         id = network_id;
+
+        /*{
+            float m[] = {0.01735949, 0.01772787, 0.01774145};
+            float b[] = {-2.13645733, -2.04468092, -1.81410977};
+            string test;
+            file_mmap(&test, "/sdcard/image");
+            float *buf = test.ptr;
+            for (i = 0; i < 227*227*3; i++)
+                buf_in[i] = buf[i] * m[i % 3] + b[i % 3];
+        }*/
 
         pthread_mutex_unlock(&mutex);
 
@@ -426,9 +456,21 @@ jni(void, created, jobject _surface)
     assert(surface);
 }
 
+float scalex, scaley;
+
 jni(void, changed, jobject surface, int format, int width, int height)
 {
-    // does anything need to be done with this?
+    scalex = 2.0f / (float) width;
+    scaley = 2.0f / (float) height;
+
+    float dy = 1.0f - (float) width / (float) height;
+    box.x0 = -1.0f;
+    box.x1 =  1.0f;
+    box.y0 = -1.0f;
+    box.y1 =  1.0f;
+
+    box.y0 += dy;
+    box.y1 -= dy;
 }
 
 jni(void, destroyed, jobject null)
@@ -606,5 +648,28 @@ jni(void, writemux, jstring path)
     AMediaMuxer_stop(mux);
     AMediaMuxer_delete(mux);
     close(fd);
+}
+
+jni(void, drag, float x0, float y0, float x1, float y1)
+{
+    float dx = (x1 - x0) * scalex, dy = (y1 - y0) * scaley;
+    float x = x0 * scalex - 1.0f, y = -y0 * scaley + 1.0f;
+
+    if (!(x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1))
+        return;
+
+    float mx = (box.x0 + box.x1) * 0.5f;
+    float my = (box.y0 + box.y1) * 0.5f;
+
+    if (x < mx)
+        box.x0 += dx;
+    else
+        box.x1 += dx;
+
+    if (y < my)
+        box.y0 -= dy;
+    else
+        box.y1 -= dy;
+
 }
 
